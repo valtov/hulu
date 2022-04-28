@@ -40,6 +40,11 @@ download [id] - prints the MPD url the video is available at and returns the mp4
 	downloadCmd := flagg.New("download", "Download a show episode or movie by its ID.")
 	downloadID := downloadCmd.String("id", "", "ID of movie or episode.")
 
+	downloadSeasonCmd := flagg.New("downloadSeason", "Download all episodes in season by its ID.")
+	seasonID := downloadSeasonCmd.String("id", "", "ID of season")
+	seasonNumber := downloadSeasonCmd.Int("number", 1, "Season number.")
+
+
 	tree := flagg.Tree{
 		Cmd: rootCmd,
 		Sub: []flagg.Tree{
@@ -105,81 +110,102 @@ download [id] - prints the MPD url the video is available at and returns the mp4
 			cmd.Usage()
 			return
 		}
-
-		playbackInformation, err := client.PlaybackInformation(*downloadID)
-		if err != nil {
-			panic(err)
-		}
-
-		serverConfig, err := client.ServerConfig()
-		if err != nil {
-			panic(err)
-		}
-
-		playlist, err := client.Playlist(serverConfig.KeyID, playbackInformation.EabID)
-		if err != nil {
-			panic(err)
-		}
-
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-		}
-
-		// request MPD file
-		response, err := client.Get(playlist.StreamURL)
-		if err != nil {
-			panic(err)
-		}
-		defer response.Body.Close()
-
-		// parse init data/PSSH from XML
-		initData, err := widevine.InitDataFromMPD(response.Body)
-		if err != nil {
-			panic(err)
-		}
-
-		cdm, err := widevine.NewDefaultCDM(initData)
-		if err != nil {
-			panic(err)
-		}
-
-		licenseRequest, err := cdm.GetLicenseRequest()
-		if err != nil {
-			panic(err)
-		}
-
-		request, err := http.NewRequest(http.MethodPost, playlist.WvServer, bytes.NewReader(licenseRequest))
-		if err != nil {
-			panic(err)
-		}
-		// hulu actually checks for headers here so this is necessary
-		request.Header = hulu.StandardHeaders()
-		request.Close = true
-		// send license request to license server
-		response, err = client.Do(request)
-		if err != nil {
-			panic(err)
-		}
-		defer response.Body.Close()
-		licenseResponse, err := io.ReadAll(response.Body)
-		if err != nil {
-			panic(err)
-		}
-
-		// parse keys from response
-		keys, err := cdm.GetLicenseKeys(licenseRequest, licenseResponse)
-		if err != nil {
-			panic(err)
-		}
-
-		command := "mp4decrypt input.mp4 output.mp4"
-		for _, key := range keys {
-			if key.Type == widevine.License_KeyContainer_CONTENT {
-				command += " --key " + hex.EncodeToString(key.ID) + ":" + hex.EncodeToString(key.Value)
-			}
-		}
-		fmt.Println("MPD URL: ", playlist.StreamURL)
-		fmt.Println("Decryption command: ", command)
+		MPD_URL, DEC_CMD := download(*downloadID)
+		fmt.Println("MPD URL: ", MPD_URL)
+		fmt.Println("Decryption command: ", DEC_CMD)
 		return
+		
+	case downloadSeasonCmd:
+		if !flagg.IsDefined(cmd, "id") || !flagg.IsDefined(cmd, "number") {
+			cmd.Usage()
+			return
+		}
+		results, err := client.Season(*seasonID, *seasonNumber)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", "Title", "ID", "MPD URL", "Decryption command" )
+		for _, item := range results.Items {
+			MPD_URL, DEC_CMD := download(item.ID)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", item.Name, item.ID, MPD_URL, DEC_CMD)
+		}
+
 	}
+
+}
+
+func download(downloadID string) (string, string){
+	playbackInformation, err := client.PlaybackInformation(downloadID)
+	if err != nil {
+		panic(err)
+	}
+
+	serverConfig, err := client.ServerConfig()
+	if err != nil {
+		panic(err)
+	}
+
+	playlist, err := client.Playlist(serverConfig.KeyID, playbackInformation.EabID)
+	if err != nil {
+		panic(err)
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// request MPD file
+	response, err := client.Get(playlist.StreamURL)
+	if err != nil {
+		panic(err)
+	}
+	defer response.Body.Close()
+
+	// parse init data/PSSH from XML
+	initData, err := widevine.InitDataFromMPD(response.Body)
+	if err != nil {
+		panic(err)
+	}
+
+	cdm, err := widevine.NewDefaultCDM(initData)
+	if err != nil {
+		panic(err)
+	}
+
+	licenseRequest, err := cdm.GetLicenseRequest()
+	if err != nil {
+		panic(err)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, playlist.WvServer, bytes.NewReader(licenseRequest))
+	if err != nil {
+		panic(err)
+	}
+	// hulu actually checks for headers here so this is necessary
+	request.Header = hulu.StandardHeaders()
+	request.Close = true
+	// send license request to license server
+	response, err = client.Do(request)
+	if err != nil {
+		panic(err)
+	}
+	defer response.Body.Close()
+	licenseResponse, err := io.ReadAll(response.Body)
+	if err != nil {
+		panic(err)
+	}
+
+	// parse keys from response
+	keys, err := cdm.GetLicenseKeys(licenseRequest, licenseResponse)
+	if err != nil {
+		panic(err)
+	}
+
+	command := "mp4decrypt input.mp4 output.mp4"
+	for _, key := range keys {
+		if key.Type == widevine.License_KeyContainer_CONTENT {
+			command += " --key " + hex.EncodeToString(key.ID) + ":" + hex.EncodeToString(key.Value)
+		}
+	}
+	return (playlist.StreamURL, command)
 }
